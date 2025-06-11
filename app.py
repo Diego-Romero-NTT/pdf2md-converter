@@ -12,6 +12,9 @@ from dotenv import load_dotenv
 # Increasing this speeds up processing but also increases the risk of hitting API rate limits.
 MAX_WORKERS = 10
 
+# Stores the name of the last generated output file
+last_output_filename = None
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -74,9 +77,23 @@ _Your concise summary here_
 def process_pdf_and_analyze(uploaded_file):
     """
     Main function that now processes PDF pages in parallel.
+    Deletes the previously generated analysis file before creating a new one.
     """
+    global last_output_filename
+
     if uploaded_file is None:
         raise gr.Error("No file uploaded. Please upload a PDF file.")
+
+    # Delete the previous output file if it exists
+    if last_output_filename and os.path.exists(last_output_filename):
+        try:
+            os.remove(last_output_filename)
+            print(f"Deleted previous analysis file: {last_output_filename}")
+            last_output_filename = None  # Reset after deletion
+        except Exception as e:
+            print(f"Error deleting previous file {last_output_filename}: {e}")
+            # Optionally, decide if this error should stop the process or just be logged
+            # For now, we'll just log it and continue
 
     file_path = uploaded_file.name
     filename = os.path.basename(file_path)
@@ -116,6 +133,7 @@ def process_pdf_and_analyze(uploaded_file):
     with open(output_filename, "w", encoding="utf-8") as md_file:
         md_file.write(markdown_content)
         
+    last_output_filename = output_filename  # Store the name of the newly created file
     return output_filename
 
 
@@ -123,8 +141,8 @@ def process_pdf_and_analyze(uploaded_file):
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown(
         """
-        # 🚀 Fast PDF Visual Analyzer (Parallel)
-        Upload a **PDF file**. The app will process up to 10 pages **simultaneously** using GPT-4o Vision
+        # 🚀 Fast PDF to Markdown Converter
+        Upload a **PDF file**. The app will process up to 10 pages **simultaneously** using GPT-4.1
         to extract text and generate a summary for each page.
         """
     )
