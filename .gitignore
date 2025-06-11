@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
+.env
+*.env
+
+# Virtual environment
+venv/
+*.venv/
+env/
+.env/
+.conda/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+# Jupyter Notebook checkpoints
+# Jupyter Notebook metadata
+.ipynb
+
+# Generated output files
+*.md
