@@ -74,12 +74,14 @@ _Your concise summary here_
         return f"## Page {page_number}\n\n*Error generating analysis for this page.*\n"
 
 
-def process_pdf_and_analyze(uploaded_file):
+def process_pdf_and_analyze(uploaded_file, progress=gr.Progress()):
     """
     Main function that now processes PDF pages in parallel.
     Deletes the previously generated analysis file before creating a new one.
+    Updates a Gradio progress bar.
     """
     global last_output_filename
+    progress(0, desc="Starting analysis...")
 
     if uploaded_file is None:
         raise gr.Error("No file uploaded. Please upload a PDF file.")
@@ -101,6 +103,7 @@ def process_pdf_and_analyze(uploaded_file):
     if not filename.lower().endswith('.pdf'):
         raise gr.Error("Unsupported file type. This version only supports PDF files.")
 
+    progress(0.05, desc="Preparing pages for analysis...")
     # STEP 1: Prepare all data first (convert all pages to images)
     print("Preparing pages for analysis...")
     doc = fitz.open(file_path)
@@ -110,10 +113,21 @@ def process_pdf_and_analyze(uploaded_file):
         img_bytes = pix.tobytes("png")
         base64_images.append(base64.b64encode(img_bytes).decode('utf-8'))
     doc.close()
-    print(f"Prepared {len(base64_images)} pages. Starting parallel analysis...")
+    
+    total_pages = len(base64_images)
+    if total_pages == 0:
+        progress(1, desc="No pages found in PDF.")
+        output_filename = f"analysis_{os.path.splitext(filename)[0]}.md"
+        with open(output_filename, "w", encoding="utf-8") as md_file:
+            md_file.write(f"# AI Analysis of {filename}\\n\\nNo pages found in the PDF.\\n")
+        last_output_filename = output_filename
+        return output_filename
+
+    print(f"Prepared {total_pages} pages. Starting parallel analysis...")
+    progress(0.1, desc=f"Prepared {total_pages} pages. Starting parallel analysis...")
 
     # STEP 2: Process pages in parallel using ThreadPoolExecutor
-    markdown_content = f"# AI Analysis of {filename}\n\n"
+    markdown_content = f"# AI Analysis of {filename}\\n\\n"
     page_numbers = range(1, len(base64_images) + 1)
     
     # The 'with' statement ensures threads are cleaned up properly.
@@ -125,15 +139,20 @@ def process_pdf_and_analyze(uploaded_file):
         results_iterator = executor.map(get_page_analysis_from_gpt, base64_images, page_numbers)
 
         # STEP 3: Collect the results as they are completed
-        for result in results_iterator:
-            markdown_content += result + "\n---\n"
+        for i, result in enumerate(results_iterator):
+            markdown_content += result + "\\n---\\n"
+            # Progress from 0.1 (preparation) to 0.9 (analysis done)
+            current_progress_fraction = 0.1 + ((i + 1) / total_pages) * 0.8
+            progress(current_progress_fraction, desc=f"Analyzed page {i+1}/{total_pages}")
 
     print("All pages analyzed. Generating markdown file.")
+    progress(0.95, desc="Generating markdown file.")
     output_filename = f"analysis_{os.path.splitext(filename)[0]}.md"
     with open(output_filename, "w", encoding="utf-8") as md_file:
         md_file.write(markdown_content)
         
     last_output_filename = output_filename  # Store the name of the newly created file
+    progress(1, desc="Analysis complete!")
     return output_filename
 
 
@@ -148,10 +167,13 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     )
     with gr.Row():
         file_input = gr.File(label="Upload your PDF file", file_types=[".pdf"])
+    
+    progress_bar = gr.Progress()
+    
     analyze_button = gr.Button("Analyze PDF with Vision", variant="primary")
     file_output = gr.File(label="Download Analysis (.md)", interactive=False)
 
-    analyze_button.click(fn=process_pdf_and_analyze, inputs=file_input, outputs=file_output)
+    analyze_button.click(fn=process_pdf_and_analyze, inputs=[file_input], outputs=[file_output])
 
 if __name__ == "__main__":
     demo.launch()
