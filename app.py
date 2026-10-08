@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -18,9 +19,11 @@ TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "600"))
 TESSDATA_PATH = os.getenv("TESSDATA_PATH")
 # OCR threads per conversion. Defaults to the CPUs the container may use.
 OCR_WORKERS = os.getenv("OCR_WORKERS")
+# Largest upload accepted, in Gradio's size format.
+MAX_FILE_SIZE = os.getenv("MAX_FILE_SIZE", "50mb")
 # Path to the LiteParse CLI.
 LIT_BIN = os.getenv("LIT_BIN", "lit")
-# Outputs older than this are deleted on the next request.
+# Uploads and outputs older than this are deleted.
 OUTPUT_TTL_SECONDS = 3600
 # The preview is cut at this many characters; the download is always complete.
 PREVIEW_CHARS = 100_000
@@ -64,6 +67,13 @@ def remove_old_outputs():
     for folder in WORK_ROOT.iterdir():
         if folder.is_dir() and folder.stat().st_mtime < cutoff:
             shutil.rmtree(folder, ignore_errors=True)
+
+
+def remove_old_outputs_forever():
+    """Clean up even when no new request arrives."""
+    while True:
+        time.sleep(OUTPUT_TTL_SECONDS)
+        remove_old_outputs()
 
 
 # Share of a page covered by vector figures above which the page goes through OCR, to catch
@@ -166,7 +176,8 @@ def convert(uploaded_path, language, use_ocr):
     return str(work_dir / f"{source.stem}.md"), preview, preview
 
 
-with gr.Blocks(title="PDF to Markdown") as demo:
+# Gradio keeps its own copy of every upload and returned file; clear it on the same schedule.
+with gr.Blocks(title="PDF to Markdown", delete_cache=(OUTPUT_TTL_SECONDS, OUTPUT_TTL_SECONDS)) as demo:
     gr.Markdown(
         f"""
         # PDF to Markdown Converter
@@ -197,4 +208,5 @@ with gr.Blocks(title="PDF to Markdown") as demo:
 
 if __name__ == "__main__":
     print(f"OCR workers: {OCR_WORKERS or cpu_limit()} (os.cpu_count={os.cpu_count()})", flush=True)
-    demo.queue(default_concurrency_limit=2).launch()
+    threading.Thread(target=remove_old_outputs_forever, daemon=True).start()
+    demo.queue(default_concurrency_limit=2, max_size=20).launch(max_file_size=MAX_FILE_SIZE)
