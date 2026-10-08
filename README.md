@@ -57,8 +57,6 @@ time you use it.
   letters. The same can happen on pages with large colored tables, which count as vector
   graphics.
 - A small block of outlined text (under 10% of the page) is not detected, so it is left out.
-- On a page that also has normal text, LiteParse may skip OCR on a small image. In tests, an
-  image covering up to 17% of such a page was skipped, while one covering 25% was read.
 - Tables may come out as plain lines of text instead of Markdown tables.
 - Handwriting is not supported.
 
@@ -73,6 +71,12 @@ characters in order for horizontal text and about 92% for vertical text.
 
 On pages that mix normal text and OCR text, the Japanese OCR text is added after the page's
 normal text instead of at its exact position.
+
+On a page that also has normal text, LiteParse drops OCR text from any image whose words are
+mostly three characters or shorter, because it takes such an image for a chart. Most Japanese
+OCR words are that short, so the text of every image on those pages was lost. When this
+happens, the app takes a picture of the whole page, runs OCR on it, and keeps only the text
+that is not already in the page's normal text.
 
 ## Privacy
 

@@ -101,8 +101,13 @@ def run_lit(source, work_dir, options, output_path, deadline):
         config_path = work_dir / "liteparse.config.json"
         config_path.write_text(json.dumps({"tessdataPath": TESSDATA_PATH}))
         command += ["--config", str(config_path)]
+    run_command(command + options, output_path, deadline)
+    return output_path.read_text(encoding="utf-8")
+
+
+def run_command(command, output_path, deadline):
     try:
-        result = subprocess.run(command + options, capture_output=True, text=True,
+        result = subprocess.run(command, capture_output=True, text=True,
                                 timeout=max(1, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         raise gr.Error(f"Conversion took longer than {TIMEOUT_SECONDS} seconds and was stopped.")
@@ -110,7 +115,6 @@ def run_lit(source, work_dir, options, output_path, deadline):
         print(f"lit failed ({result.returncode}): {result.stderr}")
         last_line = (result.stderr.strip().splitlines() or ["unknown error"])[-1]
         raise gr.Error(f"Conversion failed: {last_line}")
-    return output_path.read_text(encoding="utf-8")
 
 
 def needs_ocr(complexity):
@@ -168,6 +172,30 @@ def restore_heading_levels(ocr_page, text_page):
                      for line in ocr_page.splitlines())
 
 
+def overlaps_any(item, boxes, margin=2.0):
+    cx, cy = item["x"] + item["width"] / 2, item["y"] + item["height"] / 2
+    return any(box["x"] - margin <= cx <= box["x"] + box["width"] + margin
+               and box["y"] - margin <= cy <= box["y"] + box["height"] + margin for box in boxes)
+
+
+def ocr_page_screenshots(source, work_dir, pages, ocr_options, deadline):
+    """OCR pictures of whole pages and keep only the text that is not native text already.
+    A picture has no native text, so LiteParse's chart filter for pages with native text,
+    which drops Japanese words as chart labels, does not apply."""
+    shots_dir = work_dir / "screenshots"
+    run_command([LIT_BIN, "screenshot", str(source), "--target-pages", ",".join(str(p["page"]) for p in pages),
+                 "--dpi", "150", "-o", str(shots_dir), "--quiet"], shots_dir, deadline)
+    texts = {}
+    for page in pages:
+        shot = json.loads(run_lit(shots_dir / f"page_{page['page']}.png", work_dir, ["--format", "json"] + ocr_options,
+                                  work_dir / f"screenshot_{page['page']}.json", deadline))["pages"][0]
+        scale = page["width"] / shot["width"]
+        items = [dict(item, x=item["x"] * scale, y=item["y"] * scale,
+                      width=item["width"] * scale, height=item["height"] * scale) for item in shot["text_items"]]
+        texts[page["page"]] = read_ocr_boxes([item for item in items if not overlaps_any(item, page["text_items"])])
+    return texts
+
+
 def to_markdown(source, work_dir, ocr_options, deadline, rebuild_reading_order=False):
     output_path = work_dir / f"{source.stem}.md"
     if ocr_options is None:
@@ -189,15 +217,23 @@ def to_markdown(source, work_dir, ocr_options, deadline, rebuild_reading_order=F
     target_pages = ["--target-pages", ",".join(map(str, pages_to_ocr))]
     if rebuild_reading_order and len(text_pages) == len(pages):
         # Keep each page's native Markdown and add the OCR text, read in the right order.
+        pages_by_number = {page["page"]: page for page in pages}
         native_boxes = {page["page"]: {box_key(item) for item in page["text_items"]} for page in pages}
         ocr_json = run_lit(source, work_dir, ["--format", "json"] + target_pages + ocr_options,
                            work_dir / "ocr_pages.json", deadline)
-        for page in json.loads(ocr_json)["pages"]:
-            ocr_text = read_ocr_boxes([item for item in page["text_items"]
-                                       if box_key(item) not in native_boxes[page["page"]]])
+        ocr_texts = {page["page"]: read_ocr_boxes([item for item in page["text_items"]
+                                                   if box_key(item) not in native_boxes[page["page"]]])
+                     for page in json.loads(ocr_json)["pages"]}
+        # LiteParse found nothing to add on these pages although they hold native text and an
+        # image or figure. Read a picture of the whole page instead.
+        missed = [pages_by_number[number] for number, text in ocr_texts.items()
+                  if not text and pages_by_number[number]["text_items"]]
+        if missed:
+            ocr_texts.update(ocr_page_screenshots(source, work_dir, missed, ocr_options, deadline))
+        for number, ocr_text in ocr_texts.items():
             # A page with no native text renders as an empty code block; drop it.
-            native_text = EMPTY_CODE_BLOCK.sub("", text_pages[page["page"] - 1]).strip("\n")
-            text_pages[page["page"] - 1] = "\n\n".join(part for part in (native_text, ocr_text) if part)
+            native_text = EMPTY_CODE_BLOCK.sub("", text_pages[number - 1]).strip("\n")
+            text_pages[number - 1] = "\n\n".join(part for part in (native_text, ocr_text) if part)
     else:
         ocr_markdown = run_lit(source, work_dir, ["--format", "markdown"] + target_pages + ocr_options,
                                work_dir / "ocr_pages.md", deadline)
