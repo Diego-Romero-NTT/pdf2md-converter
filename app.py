@@ -1,179 +1,133 @@
-import gradio as gr
-import openai
+import json
 import os
-import fitz  # PyMuPDF for PDFs and image rendering
-import base64
-import concurrent.futures
-from dotenv import load_dotenv
+import shutil
+import subprocess
+import tempfile
+import time
+from pathlib import Path
 
-# --- CONFIGURATION ---
-# Set the maximum number of parallel API calls.
-# A value between 5 and 15 is usually safe.
-# Increasing this speeds up processing but also increases the risk of hitting API rate limits.
-MAX_WORKERS = 10
+import gradio as gr
 
-# Stores the name of the last generated output file
-last_output_filename = None
+# --- CONFIGURATION (override with environment variables) ---
+# Only the first MAX_PAGES pages of a document are converted.
+MAX_PAGES = int(os.getenv("MAX_PAGES", "100"))
+# A conversion that runs longer than this is aborted.
+TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "300"))
+# Folder holding the Tesseract *.traineddata files baked into the image.
+# When unset, LiteParse uses its own cache and downloads missing languages.
+TESSDATA_PATH = os.getenv("TESSDATA_PATH")
+# Path to the LiteParse CLI.
+LIT_BIN = os.getenv("LIT_BIN", "lit")
+# Outputs older than this are deleted on the next request.
+OUTPUT_TTL_SECONDS = 3600
+# The preview is cut at this many characters; the download is always complete.
+PREVIEW_CHARS = 100_000
 
-# Load environment variables from .env file
-load_dotenv()
+OCR_LANGUAGES = {
+    "English": "eng",
+    "Spanish": "spa",
+    "French": "fra",
+    "German": "deu",
+    "Italian": "ita",
+    "Portuguese": "por",
+}
+SUPPORTED_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif"]
 
-# Configure OpenAI client with the API key
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise ValueError("OPENAI_API_KEY not found. Please create a .env file and add your key.")
-client = openai.OpenAI(api_key=api_key)
+WORK_ROOT = Path(tempfile.gettempdir()) / "pdf2md"
+WORK_ROOT.mkdir(exist_ok=True)
 
 
-def get_page_analysis_from_gpt(image_base64, page_number):
-    """
-    Sends an image of a page to GPT-4o and asks it to extract the text and summarize it.
-    This function is now designed to be called concurrently from multiple threads.
-    """
+def available_languages():
+    """Languages whose OCR data is present, or every language when LiteParse manages its own cache."""
+    if not TESSDATA_PATH:
+        return list(OCR_LANGUAGES)
+    return [name for name, code in OCR_LANGUAGES.items()
+            if (Path(TESSDATA_PATH) / f"{code}.traineddata").exists()]
+
+
+def remove_old_outputs():
+    """Each request writes to its own folder; drop folders older than OUTPUT_TTL_SECONDS."""
+    cutoff = time.time() - OUTPUT_TTL_SECONDS
+    for folder in WORK_ROOT.iterdir():
+        if folder.is_dir() and folder.stat().st_mtime < cutoff:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def convert(uploaded_path, language, use_ocr):
+    if not uploaded_path:
+        raise gr.Error("No file uploaded. Please upload a PDF or an image.")
+
+    source = Path(uploaded_path)
+    if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise gr.Error(f"Unsupported file type '{source.suffix}'. Supported: {', '.join(SUPPORTED_EXTENSIONS)}")
+
+    remove_old_outputs()
+    work_dir = Path(tempfile.mkdtemp(dir=WORK_ROOT))
+    output_path = work_dir / f"{source.stem}.md"
+
+    command = [
+        LIT_BIN, "parse", str(source),
+        "--format", "markdown",
+        "--max-pages", str(MAX_PAGES),
+        "-o", str(output_path),
+        "--quiet",
+    ]
+    if use_ocr:
+        command += ["--ocr-language", OCR_LANGUAGES[language]]
+    else:
+        command.append("--no-ocr")
+    if TESSDATA_PATH:
+        config_path = work_dir / "liteparse.config.json"
+        config_path.write_text(json.dumps({"tessdataPath": TESSDATA_PATH}))
+        command += ["--config", str(config_path)]
+
     try:
-        # The print statement helps visualize the parallel execution in the console
-        print(f"Analyzing page {page_number}...")
-        
-        response = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": """From the attached image of a document page:
-1.  **Extract All Text**: Transcribe all the text you see on the page verbatim.
-2.  **Generate a Summary**: Based on the extracted text and any visual context (like charts or titles), provide a concise summary of the page's content.
+        result = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise gr.Error(f"Conversion took longer than {TIMEOUT_SECONDS} seconds and was stopped.")
 
-Please format your response clearly in Markdown without code-blocks as follows:
-### Extracted Text
-_Your verbatim transcription here_
+    if result.returncode != 0 or not output_path.exists():
+        print(f"lit failed ({result.returncode}): {result.stderr}")
+        last_line = (result.stderr.strip().splitlines() or ["unknown error"])[-1]
+        raise gr.Error(f"Conversion failed: {last_line}")
 
-### Summary
-_Your concise summary here_
-"""
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{image_base64}"
-                            },
-                        },
-                    ],
-                }
-            ],
-            max_tokens=1000,
-        )
-        analysis = response.choices[0].message.content
-        print(f"Finished analysis for page {page_number}.")
-        return f"## Page {page_number}\n\n{analysis}\n"
-
-    except Exception as e:
-        print(f"Error analyzing page {page_number}: {e}")
-        return f"## Page {page_number}\n\n*Error generating analysis for this page.*\n"
+    markdown = output_path.read_text(encoding="utf-8")
+    if not markdown.strip():
+        markdown = "_No text found. If this is a scanned document, enable OCR and try again._"
+    preview = markdown
+    if len(preview) > PREVIEW_CHARS:
+        preview = preview[:PREVIEW_CHARS] + "\n\n_Preview truncated. Download the file for the full text._"
+    return str(output_path), preview, preview
 
 
-def process_pdf_and_analyze(uploaded_file, progress=gr.Progress()):
-    """
-    Main function that now processes PDF pages in parallel.
-    Deletes the previously generated analysis file before creating a new one.
-    Updates a Gradio progress bar.
-    """
-    global last_output_filename
-    progress(0, desc="Starting analysis...")
-
-    if uploaded_file is None:
-        raise gr.Error("No file uploaded. Please upload a PDF file.")
-
-    # Delete the previous output file if it exists
-    if last_output_filename and os.path.exists(last_output_filename):
-        try:
-            os.remove(last_output_filename)
-            print(f"Deleted previous analysis file: {last_output_filename}")
-            last_output_filename = None  # Reset after deletion
-        except Exception as e:
-            print(f"Error deleting previous file {last_output_filename}: {e}")
-            # Optionally, decide if this error should stop the process or just be logged
-            # For now, we'll just log it and continue
-
-    file_path = uploaded_file.name
-    filename = os.path.basename(file_path)
-
-    if not filename.lower().endswith('.pdf'):
-        raise gr.Error("Unsupported file type. This version only supports PDF files.")
-
-    progress(0.05, desc="Preparing pages for analysis...")
-    # STEP 1: Prepare all data first (convert all pages to images)
-    print("Preparing pages for analysis...")
-    doc = fitz.open(file_path)
-    base64_images = []
-    for page in doc:
-        pix = page.get_pixmap(dpi=150)
-        img_bytes = pix.tobytes("png")
-        base64_images.append(base64.b64encode(img_bytes).decode('utf-8'))
-    doc.close()
-    
-    total_pages = len(base64_images)
-    if total_pages == 0:
-        progress(1, desc="No pages found in PDF.")
-        output_filename = f"analysis_{os.path.splitext(filename)[0]}.md"
-        with open(output_filename, "w", encoding="utf-8") as md_file:
-            md_file.write(f"# AI Analysis of {filename}\\n\\nNo pages found in the PDF.\\n")
-        last_output_filename = output_filename
-        return output_filename
-
-    print(f"Prepared {total_pages} pages. Starting parallel analysis...")
-    progress(0.1, desc=f"Prepared {total_pages} pages. Starting parallel analysis...")
-
-    # STEP 2: Process pages in parallel using ThreadPoolExecutor
-    markdown_content = f"# AI Analysis of {filename}\\n\\n"
-    page_numbers = range(1, len(base64_images) + 1)
-    
-    # The 'with' statement ensures threads are cleaned up properly.
-    # We create a pool of MAX_WORKERS threads to perform the tasks.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # executor.map applies the function to each item in the iterables.
-        # It sends a new job as soon as a thread becomes free.
-        # The results are returned in the same order the jobs were submitted.
-        results_iterator = executor.map(get_page_analysis_from_gpt, base64_images, page_numbers)
-
-        # STEP 3: Collect the results as they are completed
-        for i, result in enumerate(results_iterator):
-            markdown_content += result + "\\n---\\n"
-            # Progress from 0.1 (preparation) to 0.9 (analysis done)
-            current_progress_fraction = 0.1 + ((i + 1) / total_pages) * 0.8
-            progress(current_progress_fraction, desc=f"Analyzed page {i+1}/{total_pages}")
-
-    print("All pages analyzed. Generating markdown file.")
-    progress(0.95, desc="Generating markdown file.")
-    output_filename = f"analysis_{os.path.splitext(filename)[0]}.md"
-    with open(output_filename, "w", encoding="utf-8") as md_file:
-        md_file.write(markdown_content)
-        
-    last_output_filename = output_filename  # Store the name of the newly created file
-    progress(1, desc="Analysis complete!")
-    return output_filename
-
-
-# --- Gradio Interface (No changes needed here) ---
-with gr.Blocks(theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="PDF to Markdown") as demo:
     gr.Markdown(
-        """
-        # 🚀 Fast PDF to Markdown Converter
-        Upload a **PDF file**. The app will process up to 10 pages **simultaneously** using GPT-4.1
-        to extract text and generate a summary for each page.
+        f"""
+        # PDF to Markdown Converter
+        Upload a **PDF** or an **image** and get clean Markdown back. Parsing runs locally with
+        [LiteParse](https://github.com/run-llama/liteparse); scanned pages and images go through OCR.
+        Nothing is sent to an external AI service. Only the first {MAX_PAGES} pages are converted.
         """
     )
     with gr.Row():
-        file_input = gr.File(label="Upload your PDF file", file_types=[".pdf"])
-    
-    progress_bar = gr.Progress()
-    
-    analyze_button = gr.Button("Analyze PDF with Vision", variant="primary")
-    file_output = gr.File(label="Download Analysis (.md)", interactive=False)
+        with gr.Column(scale=1):
+            file_input = gr.File(label="PDF or image", file_types=SUPPORTED_EXTENSIONS, type="filepath")
+            language_input = gr.Dropdown(available_languages(), value="English", label="OCR language")
+            ocr_input = gr.Checkbox(value=True, label="Use OCR for scanned pages and images",
+                                    info="Turn off for faster conversion of digital PDFs.")
+            convert_button = gr.Button("Convert to Markdown", variant="primary")
+            file_output = gr.File(label="Download Markdown (.md)", interactive=False)
+        with gr.Column(scale=2):
+            with gr.Tab("Preview"):
+                preview_output = gr.Markdown()
+            with gr.Tab("Raw Markdown"):
+                raw_output = gr.Code(language="markdown", interactive=False)
 
-    analyze_button.click(fn=process_pdf_and_analyze, inputs=[file_input], outputs=[file_output])
+    convert_button.click(
+        fn=convert,
+        inputs=[file_input, language_input, ocr_input],
+        outputs=[file_output, preview_output, raw_output],
+    )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.queue(default_concurrency_limit=2).launch()

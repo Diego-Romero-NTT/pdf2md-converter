@@ -1,25 +1,17 @@
 # Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 
 # Environment
 .env
 *.env
 
-# Virtual environment
+# Virtual environments
 venv/
-*.venv/
-env/
-.env/
-.conda/
+.venv/
 
-# Jupyter Notebook
-.ipynb_checkpoints/
-# Jupyter Notebook checkpoints
-# Jupyter Notebook metadata
-.ipynb
+# Local Claude Code files
+.claude/
 
-# Generated output files
-*.md
+# Outputs from the previous OpenAI-based version
+analysis_*.md

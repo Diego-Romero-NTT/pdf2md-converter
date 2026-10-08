@@ -1,4 +1,1 @@
-gradio
-openai
-python-dotenv
-PyMuPDF
+gradio==6.29.1
