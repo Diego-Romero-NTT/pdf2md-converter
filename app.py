@@ -12,7 +12,7 @@ import gradio as gr
 # Only the first MAX_PAGES pages of a document are converted.
 MAX_PAGES = int(os.getenv("MAX_PAGES", "100"))
 # A conversion that runs longer than this is aborted.
-TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "300"))
+TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "600"))
 # Folder holding the Tesseract *.traineddata files baked into the image.
 # When unset, LiteParse uses its own cache and downloads missing languages.
 TESSDATA_PATH = os.getenv("TESSDATA_PATH")
@@ -114,7 +114,7 @@ with gr.Blocks(title="PDF to Markdown") as demo:
             file_input = gr.File(label="PDF or image", file_types=SUPPORTED_EXTENSIONS, type="filepath")
             language_input = gr.Dropdown(available_languages(), value="English", label="OCR language")
             ocr_input = gr.Checkbox(value=True, label="Use OCR for scanned pages and images",
-                                    info="Turn off for faster conversion of digital PDFs.")
+                                    info="OCR takes a few seconds per page. Turn it off for digital PDFs: they convert in about a second.")
             convert_button = gr.Button("Convert to Markdown", variant="primary")
             file_output = gr.File(label="Download Markdown (.md)", interactive=False)
         with gr.Column(scale=2):

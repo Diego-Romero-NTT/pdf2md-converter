@@ -21,9 +21,10 @@ images go through Tesseract OCR.
 - Returns a downloadable `.md` file, plus a rendered preview and the raw Markdown.
 - Runs OCR in English, Spanish, French, German, Italian or Portuguese. The language data is
   downloaded when the image is built, so requests never wait on a download.
-- Lets you switch OCR off, which is faster for PDFs that already contain text.
+- Lets you switch OCR off for PDFs that already contain text. On the free CPU hardware a
+  64-page PDF takes about 1 second without OCR and close to 4 minutes with it.
 - Converts only the first 100 pages of each document and stops any conversion that runs
-  longer than 5 minutes. Both limits can be changed with environment variables.
+  longer than 10 minutes. Both limits can be changed with environment variables.
 
 Raster images inside a PDF appear as placeholders in the Markdown. There is no AI summary
 anymore: the output is the document's own text.
@@ -55,7 +56,7 @@ it is used.
 | Variable | Default | Meaning |
 |---|---|---|
 | `MAX_PAGES` | `100` | Pages converted per document |
-| `TIMEOUT_SECONDS` | `300` | Time limit for one conversion |
+| `TIMEOUT_SECONDS` | `600` | Time limit for one conversion |
 | `TESSDATA_PATH` | `/opt/tessdata` in the image | Folder with the `*.traineddata` OCR files. The dropdown only lists languages found there |
 | `LIT_BIN` | `lit` | Path to the LiteParse CLI |
 
