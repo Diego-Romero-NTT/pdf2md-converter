@@ -12,12 +12,12 @@ sent to any external service and you don't need an API key.
 - Accepts PDF, PNG, JPG, TIFF, BMP, WebP and GIF files up to 50 MB.
 - Keeps the headings, lists and links of digital PDFs.
 - Reads text inside images, charts and scanned pages with OCR, in English, Spanish, French,
-  German, Italian or Portuguese.
+  German, Italian, Portuguese or Japanese.
 - Gives you a `.md` file to download, a rendered preview and the raw Markdown.
 
 OCR is slow, so the app only uses it on the PDF pages that need it:
 
-- pages with an image (a scan, a chart, or a photo next to normal text);
+- pages with an image (a scan, a chart, or a picture next to normal text);
 - pages where vector graphics cover at least 10% of the page. This is how text that was
   converted to outlines shows up. Small vector logos stay below that limit.
 
@@ -33,7 +33,7 @@ docker build -t pdf2md .
 docker run --rm -p 7860:7860 pdf2md
 ```
 
-Then open http://localhost:7860. The image includes the OCR data for the six languages, so
+Then open http://localhost:7860. The image includes the OCR data for all seven languages, so
 OCR never downloads anything at conversion time.
 
 Without Docker you need Node 18+ and Python 3.10+:
@@ -57,8 +57,22 @@ time you use it.
   letters. The same can happen on pages with large colored tables, which count as vector
   graphics.
 - A small block of outlined text (under 10% of the page) is not detected, so it is left out.
+- On a page that also has normal text, LiteParse may skip OCR on a small image. In tests, an
+  image covering up to 17% of such a page was skipped, while one covering 25% was read.
 - Tables may come out as plain lines of text instead of Markdown tables.
 - Handwriting is not supported.
+
+## Japanese
+
+Japanese uses Tesseract's horizontal and vertical models together (`jpn+jpn_vert`). LiteParse
+splits Japanese OCR lines in the wrong places and cannot read vertical columns, so for
+Japanese the app puts the OCR text in reading order itself: lines from left to right, or
+vertical columns from right to left. It also removes the spaces Tesseract adds between
+Japanese words. On a scanned A4 test page with 10.5 pt text, this read about 99% of the
+characters in order for horizontal text and about 92% for vertical text.
+
+On pages that mix normal text and OCR text, the Japanese OCR text is added after the page's
+normal text instead of at its exact position.
 
 ## Privacy
 

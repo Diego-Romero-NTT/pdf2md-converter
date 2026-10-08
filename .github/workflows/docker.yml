@@ -28,10 +28,12 @@ jobs:
           docker logs pdf2md
           exit 1
 
-      - name: Convert a scanned PDF with OCR
+      - name: Convert scanned PDFs with OCR (English and Japanese)
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends fonts-ipafont-gothic
           pip install --quiet gradio_client pillow
-          python tests/smoke_test.py http://127.0.0.1:7860/
+          python tests/smoke_test.py http://127.0.0.1:7860/ /usr/share/fonts/opentype/ipafont-gothic/ipag.ttf
 
       - name: App logs
         if: always()

@@ -11,7 +11,7 @@ RUN npm install -g @llamaindex/liteparse@2.15.0 && npm cache clean --force
 # The "fast" models are about 3x quicker than "best" with near-identical output.
 ENV TESSDATA_PATH=/opt/tessdata
 RUN mkdir -p "$TESSDATA_PATH" \
-    && for lang in eng spa fra deu ita por; do \
+    && for lang in eng spa fra deu ita por jpn jpn_vert; do \
          curl -fsSL -o "$TESSDATA_PATH/$lang.traineddata" \
            "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$lang.traineddata"; \
        done

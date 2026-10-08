@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import shutil
+import statistics
 import subprocess
 import tempfile
 import threading
@@ -35,7 +37,17 @@ OCR_LANGUAGES = {
     "German": "deu",
     "Italian": "ita",
     "Portuguese": "por",
+    # Both models run; Tesseract keeps whichever fits each line, horizontal or vertical.
+    "Japanese": "jpn+jpn_vert",
 }
+# Languages whose OCR boxes LiteParse lays out badly: its line grouping splits Japanese lines
+# (punctuation and kana get different box heights) and cannot read vertical columns.
+# For these, the app rebuilds the reading order of OCR text from the boxes itself.
+REBUILD_READING_ORDER = {"Japanese"}
+# Tesseract puts spaces between Japanese words; Japanese is written without them.
+CJK = r"\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff\uff00-\uffef"
+SPACE_BETWEEN_CJK = re.compile(f"(?<=[{CJK}]) +(?=[{CJK}])")
+EMPTY_CODE_BLOCK = re.compile(r"^```\w*\n\s*```$", re.MULTILINE)
 SUPPORTED_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif"]
 
 WORK_ROOT = Path(tempfile.gettempdir()) / "pdf2md"
@@ -58,7 +70,7 @@ def available_languages():
     if not TESSDATA_PATH:
         return list(OCR_LANGUAGES)
     return [name for name, code in OCR_LANGUAGES.items()
-            if (Path(TESSDATA_PATH) / f"{code}.traineddata").exists()]
+            if all((Path(TESSDATA_PATH) / f"{model}.traineddata").exists() for model in code.split("+"))]
 
 
 def remove_old_outputs():
@@ -110,10 +122,42 @@ def needs_ocr(complexity):
 
 
 def pages_needing_ocr(source, work_dir, deadline):
-    """Page count and the pages to OCR. The others keep their native text only."""
+    """Every page's native text boxes and complexity, and the pages to OCR. The others keep
+    their native text only."""
     pages = json.loads(run_lit(source, work_dir, ["--format", "json", "--no-ocr", "--complexity"],
                                work_dir / "complexity.json", deadline))["pages"]
-    return len(pages), [page["page"] for page in pages if needs_ocr(page["complexity"])]
+    return pages, [page["page"] for page in pages if needs_ocr(page["complexity"])]
+
+
+def box_key(item):
+    return item["text"], round(item["x"], 1), round(item["y"], 1)
+
+
+def read_ocr_boxes(items):
+    """Join OCR boxes in reading order. Boxes are grouped into lines (horizontal text) or
+    columns (vertical text, read right to left) by their centers, then read along each line."""
+    items = [item for item in items if item["text"].strip()]
+    if not items:
+        return ""
+    tall = sum(item["height"] > 1.5 * item["width"] for item in items if len(item["text"].strip()) > 1)
+    wide = sum(item["width"] > 1.5 * item["height"] for item in items if len(item["text"].strip()) > 1)
+    if tall > wide:
+        across = lambda item: -(item["x"] + item["width"] / 2)
+        along = lambda item: item["y"]
+        thickness = lambda item: item["width"]
+    else:
+        across = lambda item: item["y"] + item["height"] / 2
+        along = lambda item: item["x"]
+        thickness = lambda item: item["height"]
+    tolerance = 0.6 * statistics.median(thickness(item) for item in items)
+    lines = []
+    for item in sorted(items, key=across):
+        if lines and abs(across(item) - lines[-1][0]) <= tolerance:
+            lines[-1][1].append(item)
+        else:
+            lines.append((across(item), [item]))
+    text = "\n".join(" ".join(item["text"] for item in sorted(boxes, key=along)) for _, boxes in lines)
+    return SPACE_BETWEEN_CJK.sub("", text)
 
 
 def restore_heading_levels(ocr_page, text_page):
@@ -124,28 +168,46 @@ def restore_heading_levels(ocr_page, text_page):
                      for line in ocr_page.splitlines())
 
 
-def to_markdown(source, work_dir, ocr_options, deadline):
+def to_markdown(source, work_dir, ocr_options, deadline, rebuild_reading_order=False):
     output_path = work_dir / f"{source.stem}.md"
     if ocr_options is None:
         return run_lit(source, work_dir, ["--format", "markdown", "--no-ocr"], output_path, deadline)
     if source.suffix.lower() != ".pdf":
-        return run_lit(source, work_dir, ["--format", "markdown"] + ocr_options, output_path, deadline)
+        if not rebuild_reading_order:
+            return run_lit(source, work_dir, ["--format", "markdown"] + ocr_options, output_path, deadline)
+        pages = json.loads(run_lit(source, work_dir, ["--format", "json"] + ocr_options,
+                                   work_dir / "ocr.json", deadline))["pages"]
+        markdown = PAGE_SEPARATOR.join(read_ocr_boxes(page["text_items"]) for page in pages)
+        output_path.write_text(markdown, encoding="utf-8")
+        return markdown
 
-    page_count, pages_to_ocr = pages_needing_ocr(source, work_dir, deadline)
+    pages, pages_to_ocr = pages_needing_ocr(source, work_dir, deadline)
     text_markdown = run_lit(source, work_dir, ["--format", "markdown", "--no-ocr"], output_path, deadline)
     if not pages_to_ocr:
         return text_markdown
     text_pages = text_markdown.split(PAGE_SEPARATOR)
-    ocr_markdown = run_lit(source, work_dir,
-                           ["--format", "markdown", "--target-pages", ",".join(map(str, pages_to_ocr))] + ocr_options,
-                           work_dir / "ocr_pages.md", deadline)
-    ocr_pages = ocr_markdown.split(PAGE_SEPARATOR)
-    if len(text_pages) != page_count or len(ocr_pages) != len(pages_to_ocr):
-        # The document itself contains the separator line, so pages cannot be matched. OCR everything.
-        print(f"Page split mismatch for {source.name}; running OCR on the whole document.")
-        return run_lit(source, work_dir, ["--format", "markdown"] + ocr_options, output_path, deadline)
-    for page_number, ocr_page in zip(pages_to_ocr, ocr_pages):
-        text_pages[page_number - 1] = restore_heading_levels(ocr_page, text_pages[page_number - 1])
+    target_pages = ["--target-pages", ",".join(map(str, pages_to_ocr))]
+    if rebuild_reading_order and len(text_pages) == len(pages):
+        # Keep each page's native Markdown and add the OCR text, read in the right order.
+        native_boxes = {page["page"]: {box_key(item) for item in page["text_items"]} for page in pages}
+        ocr_json = run_lit(source, work_dir, ["--format", "json"] + target_pages + ocr_options,
+                           work_dir / "ocr_pages.json", deadline)
+        for page in json.loads(ocr_json)["pages"]:
+            ocr_text = read_ocr_boxes([item for item in page["text_items"]
+                                       if box_key(item) not in native_boxes[page["page"]]])
+            # A page with no native text renders as an empty code block; drop it.
+            native_text = EMPTY_CODE_BLOCK.sub("", text_pages[page["page"] - 1]).strip("\n")
+            text_pages[page["page"] - 1] = "\n\n".join(part for part in (native_text, ocr_text) if part)
+    else:
+        ocr_markdown = run_lit(source, work_dir, ["--format", "markdown"] + target_pages + ocr_options,
+                               work_dir / "ocr_pages.md", deadline)
+        ocr_pages = ocr_markdown.split(PAGE_SEPARATOR)
+        if len(text_pages) != len(pages) or len(ocr_pages) != len(pages_to_ocr):
+            # The document itself contains the separator line, so pages cannot be matched. OCR everything.
+            print(f"Page split mismatch for {source.name}; running OCR on the whole document.")
+            return run_lit(source, work_dir, ["--format", "markdown"] + ocr_options, output_path, deadline)
+        for page_number, ocr_page in zip(pages_to_ocr, ocr_pages):
+            text_pages[page_number - 1] = restore_heading_levels(ocr_page, text_pages[page_number - 1])
     markdown = PAGE_SEPARATOR.join(text_pages)
     output_path.write_text(markdown, encoding="utf-8")
     return markdown
@@ -166,7 +228,8 @@ def convert(uploaded_path, language, use_ocr):
     if use_ocr:
         ocr_options = ["--ocr-language", OCR_LANGUAGES[language],
                        "--num-workers", OCR_WORKERS or str(cpu_limit())]
-    markdown = to_markdown(source, work_dir, ocr_options, deadline)
+    markdown = to_markdown(source, work_dir, ocr_options, deadline,
+                           rebuild_reading_order=language in REBUILD_READING_ORDER)
 
     if not markdown.strip():
         markdown = "_No text found. If this is a scanned document, enable OCR and try again._"
