@@ -6,6 +6,7 @@ colorTo: pink
 sdk: docker
 app_port: 7860
 pinned: false
+license: apache-2.0
 short_description: Convert PDFs and images to Markdown, with local OCR
 ---
 
@@ -100,6 +101,10 @@ Images and PDFs with OCR off go through a single `lit parse` call.
 The `Dockerfile` starts from `node:22-bookworm-slim`. It installs Python and a pinned
 LiteParse release, downloads Tesseract's fast OCR models, and runs the app as uid 1000, the
 user Hugging Face Spaces expects.
+
+## License
+
+This project is licensed under the [Apache License 2.0](LICENSE).
 
 ## Credits
 
