@@ -144,5 +144,5 @@ with gr.Blocks(title="PDF to Markdown") as demo:
     )
 
 if __name__ == "__main__":
-    print(f"OCR workers: {OCR_WORKERS or cpu_limit()} (os.cpu_count={os.cpu_count()})")
+    print(f"OCR workers: {OCR_WORKERS or cpu_limit()} (os.cpu_count={os.cpu_count()})", flush=True)
     demo.queue(default_concurrency_limit=2).launch()

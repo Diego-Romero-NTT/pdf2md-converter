@@ -22,7 +22,7 @@ images go through Tesseract OCR.
 - Runs OCR in English, Spanish, French, German, Italian or Portuguese. The language data is
   downloaded when the image is built, so requests never wait on a download.
 - Lets you switch OCR off for PDFs that already contain text. On the free CPU hardware a
-  64-page PDF takes about 1 second without OCR and close to 4 minutes with it.
+  64-page PDF takes about 1 second without OCR and under a minute with it.
 - Converts only the first 100 pages of each document and stops any conversion that runs
   longer than 10 minutes. Both limits can be changed with environment variables.
 
@@ -57,6 +57,7 @@ it is used.
 |---|---|---|
 | `MAX_PAGES` | `100` | Pages converted per document |
 | `TIMEOUT_SECONDS` | `600` | Time limit for one conversion |
+| `OCR_WORKERS` | CPUs granted to the container | OCR threads per conversion |
 | `TESSDATA_PATH` | `/opt/tessdata` in the image | Folder with the `*.traineddata` OCR files. The dropdown only lists languages found there |
 | `LIT_BIN` | `lit` | Path to the LiteParse CLI |
 
@@ -66,5 +67,5 @@ it is used.
 `lit parse <file> --format markdown` in a separate temporary folder, so several users can
 convert files at the same time without seeing each other's results. Outputs older than an
 hour are removed on the next request. The `Dockerfile` starts from `node:22-bookworm-slim`, installs Python and a
-pinned LiteParse release, downloads the OCR language files and runs the app as uid 1000, the
+pinned LiteParse release, downloads the OCR language files (Tesseract's fast models) and runs the app as uid 1000, the
 user Hugging Face Spaces expects.
