@@ -12,8 +12,8 @@ pinned: false
 
 Upload a PDF or an image and get Markdown back. Parsing runs inside the Space with
 [LiteParse](https://github.com/run-llama/liteparse), so no document leaves the container and
-no API key is needed. Digital PDFs keep their headings, lists and links. Scanned pages and
-images go through Tesseract OCR.
+no API key is needed. Digital PDFs keep their headings, lists and links. Text inside images,
+charts and scanned pages is read with Tesseract OCR.
 
 ## What it does
 
@@ -21,8 +21,9 @@ images go through Tesseract OCR.
 - Returns a downloadable `.md` file, plus a rendered preview and the raw Markdown.
 - Runs OCR in English, Spanish, French, German, Italian or Portuguese. The language data is
   downloaded when the image is built, so requests never wait on a download.
-- Lets you switch OCR off for PDFs that already contain text. On the free CPU hardware a
-  64-page PDF takes about 1 second without OCR and under a minute with it.
+- Runs OCR only on the PDF pages that contain an image, whether a scan, a chart or a photo
+  next to normal text. Pages with only text skip OCR and keep their original text. A 64-page
+  report with two image pages converts in a few seconds. You can also switch OCR off.
 - Converts only the first 100 pages of each document and stops any conversion that runs
   longer than 10 minutes. Both limits can be changed with environment variables.
 
@@ -63,9 +64,15 @@ it is used.
 
 ## How it works
 
-`app.py` is a Gradio interface around the LiteParse command line. For each request it runs
-`lit parse <file> --format markdown` in a separate temporary folder, so several users can
-convert files at the same time without seeing each other's results. Outputs older than an
+`app.py` is a Gradio interface around the LiteParse command line. Each request runs in its own
+temporary folder, so several users can convert files at the same time without seeing each
+other's results. For a PDF with OCR on, the app:
+
+1. Runs `lit parse --complexity` without OCR to find the pages that hold an image.
+2. Converts the whole document to Markdown without OCR.
+3. Converts only the image pages with OCR and puts them in place of the same pages from step 2.
+
+If the pages of the two runs cannot be matched, it falls back to OCR on the whole document. Outputs older than an
 hour are removed on the next request. The `Dockerfile` starts from `node:22-bookworm-slim`, installs Python and a
 pinned LiteParse release, downloads the OCR language files (Tesseract's fast models) and runs the app as uid 1000, the
 user Hugging Face Spaces expects.

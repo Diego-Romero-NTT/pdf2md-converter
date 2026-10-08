@@ -66,6 +66,72 @@ def remove_old_outputs():
             shutil.rmtree(folder, ignore_errors=True)
 
 
+# LiteParse separates pages in its Markdown output with this line.
+PAGE_SEPARATOR = "\n-----\n"
+
+
+def run_lit(source, work_dir, options, output_path, deadline):
+    command = [LIT_BIN, "parse", str(source), "--max-pages", str(MAX_PAGES), "-o", str(output_path), "--quiet"]
+    if TESSDATA_PATH:
+        config_path = work_dir / "liteparse.config.json"
+        config_path.write_text(json.dumps({"tessdataPath": TESSDATA_PATH}))
+        command += ["--config", str(config_path)]
+    try:
+        result = subprocess.run(command + options, capture_output=True, text=True,
+                                timeout=max(1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        raise gr.Error(f"Conversion took longer than {TIMEOUT_SECONDS} seconds and was stopped.")
+    if result.returncode != 0 or not output_path.exists():
+        print(f"lit failed ({result.returncode}): {result.stderr}")
+        last_line = (result.stderr.strip().splitlines() or ["unknown error"])[-1]
+        raise gr.Error(f"Conversion failed: {last_line}")
+    return output_path.read_text(encoding="utf-8")
+
+
+def pages_with_images(source, work_dir, deadline):
+    """Page count and the pages holding a raster image, inline or full-page (scans).
+    Text-only pages skip OCR."""
+    pages = json.loads(run_lit(source, work_dir, ["--format", "json", "--no-ocr", "--complexity"],
+                               work_dir / "complexity.json", deadline))["pages"]
+    return len(pages), [page["page"] for page in pages
+                        if page["complexity"]["image_block_count"] > 0 or page["complexity"]["full_page_image"]]
+
+
+def restore_heading_levels(ocr_page, text_page):
+    """Heading levels depend on the font sizes seen in one run, so an OCR run over a few
+    pages can rank a line differently. Reuse the whole-document run's version of the line."""
+    originals = {line.lstrip("#").strip(): line for line in text_page.splitlines() if line.strip()}
+    return "\n".join(originals.get(line.lstrip("#").strip(), line) if line.startswith("#") else line
+                     for line in ocr_page.splitlines())
+
+
+def to_markdown(source, work_dir, ocr_options, deadline):
+    output_path = work_dir / f"{source.stem}.md"
+    if ocr_options is None:
+        return run_lit(source, work_dir, ["--format", "markdown", "--no-ocr"], output_path, deadline)
+    if source.suffix.lower() != ".pdf":
+        return run_lit(source, work_dir, ["--format", "markdown"] + ocr_options, output_path, deadline)
+
+    page_count, image_pages = pages_with_images(source, work_dir, deadline)
+    text_markdown = run_lit(source, work_dir, ["--format", "markdown", "--no-ocr"], output_path, deadline)
+    if not image_pages:
+        return text_markdown
+    text_pages = text_markdown.split(PAGE_SEPARATOR)
+    ocr_markdown = run_lit(source, work_dir,
+                           ["--format", "markdown", "--target-pages", ",".join(map(str, image_pages))] + ocr_options,
+                           work_dir / "ocr_pages.md", deadline)
+    ocr_pages = ocr_markdown.split(PAGE_SEPARATOR)
+    if len(text_pages) != page_count or len(ocr_pages) != len(image_pages):
+        # The document itself contains the separator line, so pages cannot be matched. OCR everything.
+        print(f"Page split mismatch for {source.name}; running OCR on the whole document.")
+        return run_lit(source, work_dir, ["--format", "markdown"] + ocr_options, output_path, deadline)
+    for page_number, ocr_page in zip(image_pages, ocr_pages):
+        text_pages[page_number - 1] = restore_heading_levels(ocr_page, text_pages[page_number - 1])
+    markdown = PAGE_SEPARATOR.join(text_pages)
+    output_path.write_text(markdown, encoding="utf-8")
+    return markdown
+
+
 def convert(uploaded_path, language, use_ocr):
     if not uploaded_path:
         raise gr.Error("No file uploaded. Please upload a PDF or an image.")
@@ -76,42 +142,19 @@ def convert(uploaded_path, language, use_ocr):
 
     remove_old_outputs()
     work_dir = Path(tempfile.mkdtemp(dir=WORK_ROOT))
-    output_path = work_dir / f"{source.stem}.md"
-
-    command = [
-        LIT_BIN, "parse", str(source),
-        "--format", "markdown",
-        "--max-pages", str(MAX_PAGES),
-        "-o", str(output_path),
-        "--quiet",
-    ]
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    ocr_options = None
     if use_ocr:
-        command += ["--ocr-language", OCR_LANGUAGES[language],
-                    "--num-workers", OCR_WORKERS or str(cpu_limit())]
-    else:
-        command.append("--no-ocr")
-    if TESSDATA_PATH:
-        config_path = work_dir / "liteparse.config.json"
-        config_path.write_text(json.dumps({"tessdataPath": TESSDATA_PATH}))
-        command += ["--config", str(config_path)]
+        ocr_options = ["--ocr-language", OCR_LANGUAGES[language],
+                       "--num-workers", OCR_WORKERS or str(cpu_limit())]
+    markdown = to_markdown(source, work_dir, ocr_options, deadline)
 
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        raise gr.Error(f"Conversion took longer than {TIMEOUT_SECONDS} seconds and was stopped.")
-
-    if result.returncode != 0 or not output_path.exists():
-        print(f"lit failed ({result.returncode}): {result.stderr}")
-        last_line = (result.stderr.strip().splitlines() or ["unknown error"])[-1]
-        raise gr.Error(f"Conversion failed: {last_line}")
-
-    markdown = output_path.read_text(encoding="utf-8")
     if not markdown.strip():
         markdown = "_No text found. If this is a scanned document, enable OCR and try again._"
     preview = markdown
     if len(preview) > PREVIEW_CHARS:
         preview = preview[:PREVIEW_CHARS] + "\n\n_Preview truncated. Download the file for the full text._"
-    return str(output_path), preview, preview
+    return str(work_dir / f"{source.stem}.md"), preview, preview
 
 
 with gr.Blocks(title="PDF to Markdown") as demo:
@@ -127,8 +170,8 @@ with gr.Blocks(title="PDF to Markdown") as demo:
         with gr.Column(scale=1):
             file_input = gr.File(label="PDF or image", file_types=SUPPORTED_EXTENSIONS, type="filepath")
             language_input = gr.Dropdown(available_languages(), value="English", label="OCR language")
-            ocr_input = gr.Checkbox(value=True, label="Use OCR for scanned pages and images",
-                                    info="OCR takes a few seconds per page. Turn it off for digital PDFs: they convert in about a second.")
+            ocr_input = gr.Checkbox(value=True, label="Use OCR on images",
+                                    info="Reads text inside pictures, charts and scanned pages. Pages without images skip OCR.")
             convert_button = gr.Button("Convert to Markdown", variant="primary")
             file_output = gr.File(label="Download Markdown (.md)", interactive=False)
         with gr.Column(scale=2):
