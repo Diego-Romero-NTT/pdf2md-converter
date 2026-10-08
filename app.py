@@ -66,6 +66,9 @@ def remove_old_outputs():
             shutil.rmtree(folder, ignore_errors=True)
 
 
+# Share of a page covered by vector figures above which the page goes through OCR, to catch
+# text drawn as outlines. Logos measured 1-5%; an outlined half page measured 46%.
+VECTOR_FIGURE_MIN_COVERAGE = 0.10
 # LiteParse separates pages in its Markdown output with this line.
 PAGE_SEPARATOR = "\n-----\n"
 
@@ -88,13 +91,19 @@ def run_lit(source, work_dir, options, output_path, deadline):
     return output_path.read_text(encoding="utf-8")
 
 
-def pages_with_images(source, work_dir, deadline):
-    """Page count and the pages holding a raster image, inline or full-page (scans).
-    Text-only pages skip OCR."""
+def needs_ocr(complexity):
+    """A page needs OCR when it holds a raster image (inline or a full-page scan) or a vector
+    figure big enough to be text drawn as outlines. Small vector logos stay below the cutoff."""
+    return (complexity["image_block_count"] > 0
+            or complexity["full_page_image"]
+            or complexity["layout"]["figure_coverage"] >= VECTOR_FIGURE_MIN_COVERAGE)
+
+
+def pages_needing_ocr(source, work_dir, deadline):
+    """Page count and the pages to OCR. The others keep their native text only."""
     pages = json.loads(run_lit(source, work_dir, ["--format", "json", "--no-ocr", "--complexity"],
                                work_dir / "complexity.json", deadline))["pages"]
-    return len(pages), [page["page"] for page in pages
-                        if page["complexity"]["image_block_count"] > 0 or page["complexity"]["full_page_image"]]
+    return len(pages), [page["page"] for page in pages if needs_ocr(page["complexity"])]
 
 
 def restore_heading_levels(ocr_page, text_page):
@@ -112,20 +121,20 @@ def to_markdown(source, work_dir, ocr_options, deadline):
     if source.suffix.lower() != ".pdf":
         return run_lit(source, work_dir, ["--format", "markdown"] + ocr_options, output_path, deadline)
 
-    page_count, image_pages = pages_with_images(source, work_dir, deadline)
+    page_count, pages_to_ocr = pages_needing_ocr(source, work_dir, deadline)
     text_markdown = run_lit(source, work_dir, ["--format", "markdown", "--no-ocr"], output_path, deadline)
-    if not image_pages:
+    if not pages_to_ocr:
         return text_markdown
     text_pages = text_markdown.split(PAGE_SEPARATOR)
     ocr_markdown = run_lit(source, work_dir,
-                           ["--format", "markdown", "--target-pages", ",".join(map(str, image_pages))] + ocr_options,
+                           ["--format", "markdown", "--target-pages", ",".join(map(str, pages_to_ocr))] + ocr_options,
                            work_dir / "ocr_pages.md", deadline)
     ocr_pages = ocr_markdown.split(PAGE_SEPARATOR)
-    if len(text_pages) != page_count or len(ocr_pages) != len(image_pages):
+    if len(text_pages) != page_count or len(ocr_pages) != len(pages_to_ocr):
         # The document itself contains the separator line, so pages cannot be matched. OCR everything.
         print(f"Page split mismatch for {source.name}; running OCR on the whole document.")
         return run_lit(source, work_dir, ["--format", "markdown"] + ocr_options, output_path, deadline)
-    for page_number, ocr_page in zip(image_pages, ocr_pages):
+    for page_number, ocr_page in zip(pages_to_ocr, ocr_pages):
         text_pages[page_number - 1] = restore_heading_levels(ocr_page, text_pages[page_number - 1])
     markdown = PAGE_SEPARATOR.join(text_pages)
     output_path.write_text(markdown, encoding="utf-8")

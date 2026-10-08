@@ -21,9 +21,11 @@ charts and scanned pages is read with Tesseract OCR.
 - Returns a downloadable `.md` file, plus a rendered preview and the raw Markdown.
 - Runs OCR in English, Spanish, French, German, Italian or Portuguese. The language data is
   downloaded when the image is built, so requests never wait on a download.
-- Runs OCR only on the PDF pages that contain an image, whether a scan, a chart or a photo
-  next to normal text. Pages with only text skip OCR and keep their original text. A 64-page
-  report with two image pages converts in a few seconds. You can also switch OCR off.
+- Runs OCR only on the PDF pages that need it: pages with an image (a scan, a chart, a photo
+  next to normal text) and pages where vector graphics cover at least 10% of the page, which
+  is how text converted to outlines shows up. Small vector logos stay below that limit.
+  Other pages keep their original text and skip OCR. A 64-page report with four such pages
+  converts in a few seconds. You can also switch OCR off.
 - Converts only the first 100 pages of each document and stops any conversion that runs
   longer than 10 minutes. Both limits can be changed with environment variables.
 
@@ -68,9 +70,10 @@ it is used.
 temporary folder, so several users can convert files at the same time without seeing each
 other's results. For a PDF with OCR on, the app:
 
-1. Runs `lit parse --complexity` without OCR to find the pages that hold an image.
+1. Runs `lit parse --complexity` without OCR to find the pages that hold an image or a
+   large vector figure.
 2. Converts the whole document to Markdown without OCR.
-3. Converts only the image pages with OCR and puts them in place of the same pages from step 2.
+3. Converts only those pages with OCR and puts them in place of the same pages from step 2.
 
 If the pages of the two runs cannot be matched, it falls back to OCR on the whole document. Outputs older than an
 hour are removed on the next request. The `Dockerfile` starts from `node:22-bookworm-slim`, installs Python and a
