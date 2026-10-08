@@ -16,7 +16,7 @@ RUN mkdir -p "$TESSDATA_PATH" \
            "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$lang.traineddata"; \
        done
 
-# Hugging Face Spaces run the container as uid 1000, which is the image's "node" user.
+# Run as the image's non-root "node" user (uid 1000).
 USER node
 ENV HOME=/home/node \
     PATH=/home/node/venv/bin:$PATH \

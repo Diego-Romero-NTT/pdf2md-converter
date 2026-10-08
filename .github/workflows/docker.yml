@@ -1,0 +1,38 @@
+name: Docker build and smoke test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t pdf2md .
+
+      - name: Start app
+        run: |
+          docker run -d --name pdf2md -p 7860:7860 pdf2md
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://127.0.0.1:7860/ && exit 0
+            sleep 2
+          done
+          docker logs pdf2md
+          exit 1
+
+      - name: Convert a scanned PDF with OCR
+        run: |
+          pip install --quiet gradio_client pillow
+          python tests/smoke_test.py http://127.0.0.1:7860/
+
+      - name: App logs
+        if: always()
+        run: docker logs pdf2md
