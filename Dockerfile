@@ -8,11 +8,12 @@ RUN apt-get update \
 RUN npm install -g @llamaindex/liteparse@2.15.0 && npm cache clean --force
 
 # Bake the OCR languages into the image so no download happens at request time.
+# The "fast" models are about 3x quicker than "best" with near-identical output.
 ENV TESSDATA_PATH=/opt/tessdata
 RUN mkdir -p "$TESSDATA_PATH" \
     && for lang in eng spa fra deu ita por; do \
          curl -fsSL -o "$TESSDATA_PATH/$lang.traineddata" \
-           "https://github.com/tesseract-ocr/tessdata_best/raw/main/$lang.traineddata"; \
+           "https://github.com/tesseract-ocr/tessdata_fast/raw/main/$lang.traineddata"; \
        done
 
 # Hugging Face Spaces run the container as uid 1000, which is the image's "node" user.

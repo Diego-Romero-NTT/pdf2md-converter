@@ -16,6 +16,8 @@ TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "600"))
 # Folder holding the Tesseract *.traineddata files baked into the image.
 # When unset, LiteParse uses its own cache and downloads missing languages.
 TESSDATA_PATH = os.getenv("TESSDATA_PATH")
+# OCR threads per conversion. Defaults to the CPUs the container may use.
+OCR_WORKERS = os.getenv("OCR_WORKERS")
 # Path to the LiteParse CLI.
 LIT_BIN = os.getenv("LIT_BIN", "lit")
 # Outputs older than this are deleted on the next request.
@@ -35,6 +37,17 @@ SUPPORTED_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"
 
 WORK_ROOT = Path(tempfile.gettempdir()) / "pdf2md"
 WORK_ROOT.mkdir(exist_ok=True)
+
+
+def cpu_limit():
+    """CPUs granted to this container. os.cpu_count() reports the host, which oversubscribes OCR threads."""
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            return max(1, int(quota) // int(period))
+    except (OSError, ValueError):
+        pass
+    return os.cpu_count() or 1
 
 
 def available_languages():
@@ -73,7 +86,8 @@ def convert(uploaded_path, language, use_ocr):
         "--quiet",
     ]
     if use_ocr:
-        command += ["--ocr-language", OCR_LANGUAGES[language]]
+        command += ["--ocr-language", OCR_LANGUAGES[language],
+                    "--num-workers", OCR_WORKERS or str(cpu_limit())]
     else:
         command.append("--no-ocr")
     if TESSDATA_PATH:
@@ -130,4 +144,5 @@ with gr.Blocks(title="PDF to Markdown") as demo:
     )
 
 if __name__ == "__main__":
+    print(f"OCR workers: {OCR_WORKERS or cpu_limit()} (os.cpu_count={os.cpu_count()})")
     demo.queue(default_concurrency_limit=2).launch()
